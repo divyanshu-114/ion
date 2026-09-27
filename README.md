@@ -6,15 +6,24 @@ Ion is a terminal coding harness for the AI Harness Hackathon 2026. It reads tex
 
 ## Start
 
-Requires a terminal and Python 3.12 or newer. From this repository:
+Requires a terminal and Python 3.12 or newer. From your cloned Ion repository:
 
 ```sh
+export AI_API_KEY="<your key>"
 make setup
-export OPENROUTER_API_KEY="<your key>"
 make run
 ```
 
 The default development profile is `openrouter-coding-free` (Cohere North Mini Code via OpenRouter), which completed a live small bug-fix test. Launch `ion` from the repository you want to edit; that directory becomes the immutable workspace for the process. `/doctor` checks the active credential, endpoint, model, tool support, live limits, and OpenRouter free quota. `/logs` shows the recent internal request, tool, and budget sequence. `/models` lists profiles and, when a key is available, discovers selectable provider models. `/history` shows saved runs; `/inspect TASK_ID` shows their details. `/steer TEXT` adds an instruction to a running task at its next model turn. `make test` runs the offline suite. `make clean` removes disposable build and test caches.
+
+The clone can live anywhere. `make run` uses the directory it runs in as the workspace. To work on a separate repository with the same Ion checkout, run these commands from that target repository:
+
+```sh
+make -f /path/to/ion/Makefile setup
+make -f /path/to/ion/Makefile run
+```
+
+Ion's dependencies stay in its checkout; its file tools and repository commands operate in the launch directory. Plain `make setup` and `make run` need Ion's Makefile in the current directory. Avoid `make -C /path/to/ion run` when targeting another repository, because `-C` changes the working directory to Ion's checkout.
 
 ## Terminal interface
 
@@ -24,19 +33,23 @@ Ion uses a compact workbench layout built around a task dock, session timeline, 
 | --- | --- |
 | Send task / steer a running task | Enter |
 | Insert newline | Shift+Enter or Ctrl+J |
-| Search commands | Ctrl+P or `/help` |
-| Choose model | Ctrl+X, then M or `/models` |
+| List commands | `/help` |
+| Choose model | `/models` |
+| View providers and masked keys | `/providers` |
 | Show locked workspace | Sidebar or bottom status bar |
 | Connect a configured provider | `/connect` |
 | Inspect saved tasks | `/sessions` or `/history` |
-| New task view | Ctrl+N or `/new` |
-| Toggle context sidebar | Ctrl+B |
-| Cancel active task | Escape |
-| Quit | Ctrl+Q |
+| New task view | `/new` |
+| Toggle context sidebar | `/sidebar` |
+| Cancel active task | `/stop` |
+| View recent activity | `/logs` |
+| Quit | Ctrl+C or `/quit` |
 
 The sidebar hides automatically in narrow terminals. Session transcripts and highlighted diffs reflow when the terminal is resized. Sessions are journaled for inspection and `/resume TASK_ID` performs recovery checks before preparing a safe re-submission; it never replays an old mutation. Each submitted task starts a foreground engine run; messages sent while it is running are steering instructions.
 
 `/connect` offers the providers configured in `ion.toml`. Its masked input keeps the key in the current process only and does not write credentials to disk. Catalog access or the next request checks whether the key works. Existing environment configuration remains available. OAuth and additional provider protocols are separate work; matching the dialog layout does not add those capabilities.
+
+Provider views show configured credentials as `***`; key entry uses asterisks. `/logs` shows timestamped actions, model requests, failures, retries, and outcomes in plain language. Detailed structured events remain in the diagnostic file shown below the log. Ctrl+C stops active work and exits, including from dialogs; `/stop` keeps Ion open.
 
 ## Choose a provider
 
@@ -51,9 +64,32 @@ The committed [ion.toml](ion.toml) contains Groq Qwen, OpenRouter coding, Qwen, 
 
 The direct provider APIs may require a paid account. A `:free` OpenRouter model is subject to provider availability and rate limits. Catalog availability is checked live; these profiles are examples, not a promise that every model remains free or available.
 
-For local use, copy `.env.example` to `.env` beside the active `ion.toml` and fill in the key for the provider you selected. Ion loads that file without overriding environment variables already set by the shell. Set `ION_ENV_FILE` to use a different local file. Locked evaluation mode skips dotenv and reads only the externally provided `AI_API_KEY`.
+For local use, copy `.env.example` to `.env` beside the active `ion.toml` and fill in the key for the provider you selected. Ion loads that file without overriding environment variables already set by the shell. Set `ION_ENV_FILE` to use a different local file. An externally exported `AI_API_KEY` automatically activates locked evaluation, skips dotenv, and takes precedence over provider-specific credentials.
 
-To connect another OpenAI compatible text model, create a TOML file outside the target repository with `schema_version = 1`, `default_profile`, and a `[profiles.NAME]` section. Specify `provider`, `base_url` (HTTPS), `model`, `api_key_env`, `protocol = "openai_chat"`, `tool_protocol = "native"` or `"structured_json"`, `text_only = true`, `locked = false`, `context_window`, and `max_output_tokens`. Launch with `ION_CONFIG=/path/to/your.toml make run`. A provider specific key is preferred; `AI_API_KEY` is the fallback in normal use. Never place key values in TOML or Git.
+For optional developer configuration, set `AI_API_KEY` and `AI_PROVIDER`. These additional settings are not part of the evaluator's required flow. Supported shortcuts are `deepseek`, `qwen`, `groq`, `openrouter`, and `openai`. DeepSeek defaults to `deepseek-flash`; Qwen defaults to `qwen-plus`. Set `AI_MODEL` to override either default; the other shortcuts require `AI_MODEL`. Set `AI_BASE_URL` to override the endpoint, including the region for your Qwen key. Any other OpenAI-compatible service can use `AI_BASE_URL` plus `AI_MODEL`, with an optional custom `AI_PROVIDER` label. These explicit routing settings select a new startup profile that reads only `AI_API_KEY`, so an old provider-specific key cannot take precedence. A key alone does not identify its issuer; Ion never probes other providers with your key.
+
+Environment connections use native tool calling and a conservative 8,192-token context budget. For custom context limits or structured JSON tools, create a TOML file with `schema_version = 1`, `default_profile`, and a `[profiles.NAME]` section containing `provider`, `base_url` (HTTPS), `model`, `api_key_env`, `protocol = "openai_chat"`, `tool_protocol = "native"` or `"structured_json"`, `text_only = true`, `locked = false`, `context_window`, and `max_output_tokens`. Launch with `ION_CONFIG=/path/to/your.toml make run` and leave the routing environment settings unset. Existing TOML profiles prefer their provider-specific key and fall back to `AI_API_KEY`. Never place key values in TOML or Git. Services requiring a different wire protocol need a separate adapter.
+
+## Quick start usage
+
+Ion follows an economy mode workflow for small tasks:
+
+Type ordinary questions or edit requests into the composer. For example, “how should I use this repo?” asks Ion to inspect relevant files and explain usage. Recognized repository questions use read-only tools; model attempts to edit or execute commands are rejected. “Improve this repo's README usage section” requests an actual documentation edit. Read-only answers can finish as ordinary text after inspection; edit requests that stop at advice are redirected toward applying changes. Large required instructions that cannot fit the model context are reported as a context limit, separately from a spent request/token budget.
+
+**Basic workflow:**
+1. **Read** a file to inspect its contents
+2. **Edit** with a brief plan and exact replacement
+3. **Check** bounded repository commands verify changes
+4. **Finish** with final diff and evidence
+
+Tools available for repository operations:
+- `repo_list`: List files in directories
+- `repo_search`: Find literal text with path filtering
+- `file_read`: Read bounded pages (up to 12,000 chars) with read IDs
+- `edit_file`: Apply exact text replacements
+- `write_file`: Create or rewrite complete files
+- `command_start`: Run bounded repository checks
+- `finish_request`: Complete tasks or report blockers
 
 ## Small tasks and token budget
 
@@ -98,7 +134,17 @@ Live smoke result (2026-09-27): the default model fixed subtraction to addition 
 
 ## Hackathon evaluation
 
-The Makefile exposes `make setup`, `make run`, `make test`, and `make clean`. The evaluator can export `AI_API_KEY` before launch. Once the committee gives the exact provider, model, and endpoint, add a profile with `locked = true` and set `evaluation_profile = "NAME"` in `ion.toml`. That mode reads **only** `AI_API_KEY` and disables model switching. The announcement reported Qwen and DeepSeek model families; the exact official model IDs and credential provider are still required to freeze an evaluation profile. The project does not claim official submission readiness until those are confirmed and a live end to end run succeeds.
+The evaluator uses exactly this startup sequence:
+
+```sh
+export AI_API_KEY="your-provider-key"
+make setup
+make run
+```
+
+No additional environment variables, login, or evaluator configuration edits are required. The exported key automatically activates locked evaluation, skips local dotenv loading, and takes precedence over provider-specific keys. Ion uses the committed `evaluation_profile`, or locks `default_profile` when no evaluation profile is configured.
+
+Before submission, the team must commit the committee's direct provider endpoint, exact model ID, and limits in `ion.toml`. Direct DeepSeek and Qwen credentials cannot be reliably distinguished from a bare key. The current development default is OpenRouter; it is not a universal destination for direct provider keys. Supporting either provider's key without knowing which provider issued it remains unresolved until the committee specifies the destination. The team must resolve this before submission rather than adding evaluator steps. Offline tests cover key-only launch and credential isolation; a live end-to-end run with the committee's exact endpoint, model, and key is still required.
 
 Ion executes repository commands on the local machine. Use it on repositories you trust. Tool output, patches, and run history are retained under the user's Ion data directory. The foreground TUI records operation intent before dispatch, uses a durable workspace admission claim, exposes reconnectable session event primitives, and wires source-linked memory plus atomic compaction checkpoints into runs. Detached client-independent execution remains a future increment; current runs stay attached to the foreground TUI. See the [agile delivery guide](docs/agile.md) and [hackathon rules](docs/rules.md) for the remaining release gates.
 
