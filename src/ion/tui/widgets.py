@@ -67,13 +67,6 @@ class Composer(TextArea):
     def action_line_break(self) -> None:
         self.insert('\n')
 
-    async def on_key(self, event) -> None:
-        if getattr(self.app, 'leader_next', False):
-            event.prevent_default()
-            event.stop()
-            await self.app.on_key(event)
-
-
 class Picker(ModalScreen[str | None]):
     BINDINGS = [('escape', 'dismiss(None)', 'Close')]
 
@@ -113,6 +106,13 @@ class Picker(ModalScreen[str | None]):
         self.dismiss(event.option.id)
 
 
+class SecretInput(Input):
+    @property
+    def _value(self) -> Text:
+        # Keep one cell per character so cursor movement and editing still work.
+        return Text('*' * len(self.value), no_wrap=True, overflow='ignore', end='')
+
+
 class EntryDialog(ModalScreen[str | None]):
     BINDINGS = [('escape', 'dismiss(None)', 'Close')]
 
@@ -123,7 +123,8 @@ class EntryDialog(ModalScreen[str | None]):
     def compose(self) -> ComposeResult:
         with Vertical(id='entry-dialog'):
             yield Static(self.heading, id='dialog-title', markup=False)
-            yield Input(value=self.value, password=self.secret, placeholder='API key' if self.secret else 'Repository path', id='entry')
+            field = SecretInput if self.secret else Input
+            yield field(value=self.value, password=self.secret, placeholder='API key' if self.secret else 'Repository path', id='entry')
             yield Static(self.hint, id='dialog-hint', markup=False)
 
     def on_mount(self) -> None:

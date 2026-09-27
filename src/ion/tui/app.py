@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
+from datetime import datetime
 from pathlib import Path
 
 from rich.panel import Panel
@@ -30,18 +30,15 @@ from ion.session import SessionService, SessionSocketServer
 from ion.tools.registry import ToolDispatcher
 from ion.workspace import Workspace
 from ion.tui.widgets import Brand, Composer, EntryDialog, Picker, Transcript
+from ion.tui.logs import PHASE_LABELS, activity_message, format_diagnostic, mask_keys
 
 
-class IonApp(App):
+class IonApp(App, inherit_bindings=False):
     CSS_PATH = 'app.tcss'
     TITLE = 'Ion'
+    ENABLE_COMMAND_PALETTE = False
     BINDINGS = [
-        Binding('ctrl+p', 'commands', 'Commands', priority=True),
-        Binding('ctrl+x', 'leader', 'Leader', priority=True),
-        Binding('ctrl+n', 'new', 'New task', priority=True),
-        Binding('ctrl+b', 'sidebar', 'Sidebar', priority=True),
-        Binding('escape', 'cancel', 'Cancel'),
-        Binding('ctrl+q', 'quit', 'Quit', priority=True),
+        Binding('ctrl+c', 'shutdown', 'Exit', priority=True),
     ]
 
     def __init__(self, config: AppConfig, workspace_root: str | Path | None = None) -> None:
@@ -60,7 +57,6 @@ class IonApp(App):
         self.store: RunStore | None = None
         self.session_service: SessionService | None = None
         self.session_server: SessionSocketServer | None = None
-        self.leader_next = False
         self.catalog = None
         self._transcript: list = []
 
@@ -68,7 +64,7 @@ class IonApp(App):
         with Horizontal(id='masthead'):
             yield Static('ION', id='masthead-brand')
             yield Static('AUTONOMOUS REPOSITORY WORKBENCH', id='masthead-title')
-            yield Static('CTRL P  COMMANDS', id='masthead-command')
+            yield Static('/help  COMMANDS', id='masthead-command')
         with Horizontal(id='body'):
             with Vertical(id='main'):
                 yield Static('New task', id='session-header', markup=False)
@@ -85,7 +81,7 @@ class IonApp(App):
                                 yield Static('', id='profile', markup=False)
                                 yield Button('send ↵', id='run')
                                 yield Button('stop esc', id='cancel', disabled=True)
-                        yield Static('CTRL P  COMMANDS    CTRL X M  MODELS    SHIFT ENTER  NEWLINE', id='hints')
+                        yield Static('/help  /models  /logs  /stop    Ctrl+C exit', id='hints')
                         yield Static('', id='status', markup=False)
             with Vertical(id='sidebar'):
                 yield Static('RUN STATE', id='sidebar-title')
@@ -149,7 +145,7 @@ class IonApp(App):
         label.append(profile.model_id.split('/')[-1], style='#e5e9e8')
         label.append(f'  /  {profile.provider}' + ('  /  key needed' if not credential else ''), style='#7d888b')
         self.query_one('#profile', Static).update(label)
-        self.query_one('#model-info', Static).update(f'{profile.model_id.split("/")[-1]}\n{profile.provider}\n' + ('Evaluation locked' if self.mode == 'evaluation' else 'Selected for next task'))
+        self.query_one('#model-info', Static).update(f'{profile.model_id.split("/")[-1]}\n{profile.provider}\nKey: {"***" if credential else "not set"}\n' + ('Evaluation locked' if self.mode == 'evaluation' else 'Selected for next task'))
 
     def _repo_label(self) -> None:
         path = self.repo_path.replace(str(Path.home()), '~', 1)
@@ -157,10 +153,14 @@ class IonApp(App):
         self.query_one('#repo-info', Static).update(path)
 
     def _status(self, value: str) -> None:
-        self.query_one('#status', Static).update(value)
+        self.query_one('#status', Static).update(mask_keys(value))
 
     def _log(self, value) -> None:
         renderable = Text(value) if isinstance(value, str) else value
+        if isinstance(renderable, Text):
+            masked = mask_keys(renderable.plain)
+            if masked != renderable.plain:
+                renderable = Text(masked, style=renderable.style)
         self._transcript.append(renderable)
         self._transcript = self._transcript[-400:]
         log = self.query_one('#activity', RichLog)
@@ -180,32 +180,18 @@ class IonApp(App):
     def _busy(self) -> bool:
         return bool(self.running_task and not self.running_task.done())
 
-    def action_leader(self) -> None:
-        self.leader_next = True
-        self._status('m models · n new · l sessions · b sidebar')
-        self.set_timer(2, self._clear_leader)
-
-    def _clear_leader(self) -> None:
-        if self.leader_next:
-            self.leader_next = False
-            self._status('')
-
-    async def on_key(self, event) -> None:
-        if self.leader_next and event.key != 'ctrl+x':
-            self.leader_next = False
-            event.stop()
-            event.prevent_default()
-            command = {'m': '/models', 'n': '/new', 'l': '/sessions', 'b': '/sidebar'}.get(event.key)
-            if command:
-                await self._command(command)
-
     def action_commands(self) -> None:
-        items = [('/models', 'Models                 Choose provider / model'), ('/connect', 'Connect provider       Add a key for this session'), ('/sessions', 'Sessions               Inspect saved tasks'), ('/resume TASK_ID', 'Resume                 Continue only after recovery checks'), ('/logs', 'Diagnostics            Show recent harness actions'), ('/new', 'New task               Clear the conversation view'), ('/sidebar', 'Sidebar                Show / hide context'), ('/doctor', 'Doctor                 Check configuration')]
+        descriptions = [('/models', 'Choose a model'), ('/providers', 'View providers and masked keys'), ('/connect', 'Connect a provider for this session'), ('/sessions', 'Browse saved tasks'), ('/inspect TASK_ID', 'View a saved result'), ('/resume TASK_ID', 'Prepare a saved task to resume'), ('/steer TEXT', 'Guide the running task'), ('/logs', 'Read recent activity and errors'), ('/new', 'Start a new task'), ('/stop', 'Stop the running task'), ('/sidebar', 'Show or hide task details'), ('/repo', 'Show the current workspace'), ('/doctor', 'Check the provider connection'), ('/quit', 'Exit Ion (Ctrl+C)')]
+        items = [(command, f'{command:<19} {description}') for command, description in descriptions]
         self.push_screen(Picker('Commands', items), self._picked_command)
 
     def _picked_command(self, value: str | None) -> None:
         if value:
-            self.run_worker(self._command(value))
+            if ' ' in value:
+                self.query_one(Composer).text = value.split(' ', 1)[0] + ' '
+                self.query_one(Composer).focus()
+            else:
+                self.run_worker(self._command(value))
 
     def action_sidebar(self) -> None:
         self.default_screen.toggle_class('sidebar-visible')
@@ -228,6 +214,14 @@ class IonApp(App):
                 await self.engine.cancel()
             self.running_task.cancel()
             self._status('Cancelled. Partial changes remain in the repository.')
+        else:
+            self._status('No task is running.')
+
+    async def action_shutdown(self) -> None:
+        if self._busy():
+            await self.action_cancel()
+            await asyncio.gather(self.running_task, return_exceptions=True)
+        self.exit()
 
     async def on_composer_submitted(self, event: Composer.Submitted) -> None:
         text = self.query_one(Composer).text.strip()
@@ -260,7 +254,24 @@ class IonApp(App):
         elif command == '/sidebar':
             self.action_sidebar()
         elif command == '/repo':
-            self._status('Workspace is locked to the directory where Ion was launched.')
+            self._status(f'Workspace locked to: {self.repo_path}')
+        elif command in ('/stop', '/cancel'):
+            await self.action_cancel()
+        elif command in ('/quit', '/exit'):
+            await self.action_shutdown()
+        elif command == '/providers':
+            self._session('Providers')
+            seen = set()
+            profiles = [self._profile()] if self.mode == 'evaluation' else [resolve_profile(self.config, name, 'product') for name in self.config.profiles]
+            for profile in profiles:
+                key, key_name = resolve_credential(profile, self.mode)
+                identity = (profile.provider, profile.endpoint, key_name)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                active = ' · active' if profile.endpoint == self._profile().endpoint else ''
+                self._log(f'{profile.provider}{active}\n  {profile.endpoint}\n  {key_name}={"***" if key else "not set"}')
+            self._status('Use /doctor to check the active connection.' if self.mode == 'evaluation' else 'Use /connect to add or replace a key.')
         elif command == '/connect':
             if self.mode == 'evaluation' or self._busy():
                 self._status('Provider connection is locked during evaluation or a running task.')
@@ -273,7 +284,7 @@ class IonApp(App):
                 if connector not in seen:
                     seen.add(connector)
                     key, _ = resolve_credential(profile, self.mode)
-                    items.append((name, f'{profile.provider}  ·  ' + ('key available' if key else 'connect')))
+                    items.append((name, f'{profile.provider}  ·  ' + ('key: ***' if key else 'not connected')))
             self.push_screen(Picker('Connect a provider', items, 'Keys entered here are kept only for this Ion session.'), self._connect_profile)
         elif command in ('/history', '/sessions'):
             rows = self.store.recent() if self.store else []
@@ -291,18 +302,17 @@ class IonApp(App):
         elif command in ('/logs', '/debug'):
             path = self._data_root() / 'logs' / 'ion.jsonl'
             records = recent_diagnostics(path)
-            self._session('Harness diagnostics')
-            self._log(f'Diagnostic file: {path}')
+            self._session('Activity logs')
+            self._log('Recent activity · local time · oldest to newest')
             if not records:
-                self._log('No diagnostic events recorded yet.')
+                self._log('No activity yet. Submit a task to see progress here.')
             for record in records:
-                fields = {key: value for key, value in record.items() if key not in {'time', 'task_id', 'event'}}
-                time = str(record.get('time', ''))[11:19]
-                self._log(f"{time}  {record.get('event', 'event')}  {json.dumps(fields, ensure_ascii=False, separators=(',', ':'))}")
+                self._log(format_diagnostic(record))
+            self._status(f'{len(records)} recent events · Detailed log: {path}')
         elif command.startswith('/steer ') and self.engine:
             await self.engine.steer(command.removeprefix('/steer '))
         else:
-            self._status('Unknown command. Use /help or ctrl+p.')
+            self._status('Unknown command. Type /help to see available commands.')
 
     def _connect_profile(self, name: str | None) -> None:
         if not name:
@@ -560,5 +570,7 @@ class IonApp(App):
             if event.message.startswith(('Request ', 'Usage:')):
                 self.query_one('#context-info', Static).update(event.message)
             else:
-                self._log(Text(f'  {event.phase.value}  {event.message}', style='#aaaaaa'))
-            self._status(event.message[:140])
+                label = PHASE_LABELS.get(event.phase.value, 'Working')
+                time = datetime.now().strftime('%H:%M:%S')
+                self._log(Text(f'{time}  {label}  {activity_message(event.message)}', style='#aaaaaa'))
+            self._status(activity_message(event.message)[:180])
