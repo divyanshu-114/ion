@@ -1,5 +1,6 @@
 from ion.context import ContextManager
 from ion.contracts import ModelProfile, Phase, TaskSpec
+from ion.tools.registry import tool_schemas
 
 
 def test_context_trim_keeps_task_and_complete_latest_tool_turn():
@@ -11,7 +12,9 @@ def test_context_trim_keeps_task_and_complete_latest_tool_turn():
             {"role": "assistant", "content": None, "tool_calls": [{"id": f"c{index}", "type": "function", "function": {"name": "file_read", "arguments": "{}"}}]},
             {"role": "tool", "tool_call_id": f"c{index}", "content": "x" * 1300},
         ]
-    packet = ContextManager().build(task, profile, Phase.act, history, "", ("Do not change dependencies",))
+    names = ("file_read", "finish_request")
+    packet = ContextManager().build(task, profile, Phase.act, history, "", ("Do not change dependencies",),
+                                    tools=tool_schemas(names), tool_names=names)
     assert packet.dropped_turns > 0
     assert "keep the API stable" in packet.messages[0]["content"]
     assert "Do not change dependencies" in packet.messages[0]["content"]

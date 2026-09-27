@@ -44,12 +44,11 @@ async def test_economy_read_read_edit_finishes_without_repository_checks(tmp_pat
         TaskSpec(text="Rewrite the README with more detail", repo_path=str(repo), profile_name="openrouter-coding-free")
     )
     third_tools = [item["function"]["name"] for item in provider.requests[2].tools]
-    assert {"file_read", "repo_search", "edit_file", "write_file", "diff_inspect", "finish_request"} <= set(third_tools)
+    assert {"file_read", "edit_file", "write_file", "finish_request"} <= set(third_tools)
+    assert "repo_search" not in third_tools
     third_messages = provider.requests[2].messages
-    assert len(third_messages) == 2
-    assert third_messages[1]["role"] == "user"
-    assert "read_id=r1 path=README.md offset=0" in third_messages[1]["content"]
-    assert not any(message.get("tool_calls") for message in third_messages)
+    assert any(message.get("tool_call_id") == "r2" for message in third_messages)
+    assert "Short introduction." in json.dumps(third_messages)
     assert result.changed_files == ("README.md",)
     assert result.outcome == "unverified"
     assert len(provider.requests) == 3

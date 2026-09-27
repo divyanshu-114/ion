@@ -29,7 +29,11 @@ def test_compaction_retains_bounded_memory_and_rules(tmp_path):
     profile = ModelProfile(provider="test", endpoint="https://example.com", model_id="test", context_window=32000, max_output_tokens=1000)
     history = [{"role": "user", "content": task.text}]
     for i in range(12):
-        history += [{"role": "assistant", "content": "Read file"}, {"role": "user", "content": "x" * 4000}]
+        history += [
+            {"role": "assistant", "content": None, "tool_calls": [{"id": f"read-{i}", "type": "function",
+             "function": {"name": "file_read", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": f"read-{i}", "content": "x" * 4000},
+        ]
     packet = ContextManager().build(task, profile, Phase.act, history, "Never modify generated files", memory='{"path":"parser.py","status":"read"}')
     assert packet.dropped_turns > 0
     assert "parser.py" in json.dumps(packet.messages)

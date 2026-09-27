@@ -23,6 +23,8 @@ async def test_patch_requires_current_hash_and_preserves_external_file(tmp_path)
     tools = ToolDispatcher(workspace, ArtifactStore(tmp_path / "artifacts"), NoCommands())
     (repo / "user.txt").write_text("external\n")
     good = {"path": "app.py", "expected_hash": digest(b"before\n"), "old_text": "before", "new_text": "after"}
+    observed = await tools.execute(ToolCall(task_id="t", tool="file_read", arguments={"relative_path": "app.py"}))
+    assert observed.status.value == "succeeded"
     result = await tools.execute(ToolCall(task_id="t", tool="patch_apply", arguments={"edits": [good]}))
     assert result.status.value == "succeeded"
     assert (repo / "app.py").read_text() == "after\n"

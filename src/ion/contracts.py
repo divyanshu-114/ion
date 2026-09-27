@@ -177,6 +177,29 @@ class ContextCheckpoint(StrictModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class ContextManifest(StrictModel):
+    included_turn_ids: tuple[str, ...] = ()
+    omitted_turn_ids: tuple[str, ...] = ()
+    checkpoint_id: str | None = None
+    pinned_evidence_refs: tuple[str, ...] = ()
+    selected_tool_names: tuple[str, ...] = ()
+    estimated_input_tokens: int = Field(ge=0)
+    output_cap: int = Field(gt=0)
+    omission_reasons: dict[str, str] = Field(default_factory=dict)
+
+
+class BudgetReport(StrictModel):
+    requests_used: int = Field(ge=0)
+    requests_remaining: int = Field(ge=0)
+    settled_tokens: int = Field(ge=0)
+    reserved_tokens: int = Field(ge=0)
+    token_limit: int | None = Field(default=None, ge=0)
+    deadline_reached: bool
+    protected_tokens: int = Field(default=0, ge=0)
+    estimated_input_tokens: int | None = Field(default=None, ge=0)
+    output_cap: int | None = Field(default=None, ge=0)
+
+
 class TaskResult(StrictModel):
     schema_version: Literal[1] = 1
     task_id: str
@@ -191,6 +214,9 @@ class TaskResult(StrictModel):
     reported_input_tokens: int = 0
     reported_output_tokens: int = 0
     accounted_tokens: int = 0
+    error_category: str | None = None
+    request_dispatched: bool | None = None
+    budget: BudgetReport | None = None
 
 
 class ModelRequest(StrictModel):

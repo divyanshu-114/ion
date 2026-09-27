@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ion.contracts import ModelProfile, TaskSpec
 
@@ -16,6 +16,29 @@ class EconomyConfig(BaseModel):
     enabled: bool = True
     max_requests: int = Field(default=12, ge=2, le=100)
     max_total_tokens: int = Field(default=24000, ge=2048)
+    inspect_output_tokens: int = Field(default=512, ge=256)
+    edit_output_tokens: int = Field(default=1024, ge=384)
+    rewrite_output_tokens: int = Field(default=4096, ge=768)
+    verify_output_tokens: int = Field(default=512, ge=256)
+    finalize_output_tokens: int = Field(default=512, ge=256)
+    verification_reserve_tokens: int = Field(default=256, ge=0)
+    finalization_reserve_tokens: int = Field(default=256, ge=0)
+    max_tool_preview_chars: int = Field(default=4000, ge=256, le=16000)
+    compaction_recoveries: Literal[1] = 1
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_legacy_preview_name(cls, value):
+        if isinstance(value, dict) and "tool_preview_max_chars" in value:
+            value = dict(value)
+            if "max_tool_preview_chars" in value:
+                raise ValueError("set only one tool preview maximum")
+            value["max_tool_preview_chars"] = value.pop("tool_preview_max_chars")
+        return value
+
+    @property
+    def tool_preview_max_chars(self) -> int:
+        return self.max_tool_preview_chars
 
 
 class AppConfig(BaseModel):

@@ -19,19 +19,47 @@ SPECS: dict[str, dict[str, Any]] = {
     "repo_list": {"relative_path": "string"},
     "repo_search": {"query": "string"},
     "file_read": {"relative_path": "string"},
+    "file_outline": {"relative_path": "string"},
     "patch_apply": {"edits": "array"},
     "command_start": {"command": "string"},
     "diff_inspect": {},
+    "diff_summary": {},
     "artifact_read": {"artifact_id": "string"},
+    "artifact_search": {"artifact_id": "string", "query": "string"},
     "finish_request": {"summary": "string"},
 }
 
 ECONOMY_TOOLS = ("repo_list", "repo_search", "file_read", "edit_file", "write_file", "diff_inspect", "finish_request")
+MAX_PATCH_EDITS = 8
+MAX_PATCH_REPLACEMENT_BYTES = 32_000
 
 
 def private_path(path: str) -> bool:
     name = Path(path).name.lower()
     return name == ".env" or name.startswith(".env.") or name in {"credentials.json", "id_rsa", "id_ed25519"} or name.endswith((".pem", ".key", ".p12"))
+
+
+def _optional_properties(name: str) -> dict[str, Any]:
+    if name in {"file_read", "artifact_read", "repo_list"}:
+        result: dict[str, Any] = {"offset": {"type": "integer", "minimum": 0}}
+    else:
+        result = {}
+    if name == "file_read":
+        result["limit"] = {"type": "integer", "minimum": 256, "maximum": 16000}
+    elif name == "artifact_read":
+        result["limit"] = {"type": "integer", "minimum": 1, "maximum": 4000}
+    elif name == "file_outline":
+        result["max_items"] = {"type": "integer", "minimum": 1, "maximum": 80}
+    elif name == "artifact_search":
+        result.update({"query": {"type": "string", "minLength": 1, "maxLength": 256},
+                       "cursor": {"type": "integer", "minimum": 0},
+                       "max_matches": {"type": "integer", "minimum": 1, "maximum": 20}})
+    elif name == "diff_summary":
+        result["relative_paths"] = {"type": "array", "maxItems": 60, "uniqueItems": True,
+                                    "items": {"type": "string"}}
+    elif name == "repo_search":
+        result["relative_path"] = {"type": "string"}
+    return result
 
 
 def tool_schemas(names: tuple[str, ...] | None = None) -> tuple[dict[str, Any], ...]:
@@ -43,21 +71,24 @@ def tool_schemas(names: tuple[str, ...] | None = None) -> tuple[dict[str, Any], 
                 "repo_list": "List repository text files",
                 "repo_search": "Find literal text; returned offsets can be passed to file_read. Optionally narrow relative_path.",
                 "file_read": "Read up to 4000 characters and full-file SHA-256; use next_offset to read more",
+                "file_outline": "List up to 80 source section line ranges without source bodies",
                 "patch_apply": "Replace exact old_text with new_text, requiring expected_hash for each file",
                 "command_start": "Run a bounded repository command",
                 "diff_inspect": "Inspect changes since task start",
-                "artifact_read": "Read a retained tool artifact",
+                "diff_summary": "Summarize changed file hashes and sizes without patch text",
+                "artifact_read": "Read a bounded page of a retained tool artifact",
+                "artifact_search": "Find up to 20 bounded snippets in a retained artifact",
                 "finish_request": "Request verification and final report",
             }[name],
             "parameters": {
                 "type": "object",
                 "properties": {key: (
-                    {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {
+                    {"type": "array", "minItems": 1, "maxItems": MAX_PATCH_EDITS, "items": {"type": "object", "properties": {
                         "path": {"type": "string"}, "expected_hash": {"type": "string"},
                         "old_text": {"type": "string"}, "new_text": {"type": "string"},
                     }, "required": ["path", "expected_hash", "old_text", "new_text"], "additionalProperties": False}}
                     if name == "patch_apply" and key == "edits" else {"type": typ}
-                ) for key, typ in fields.items()} | ({"offset": {"type": "integer", "minimum": 0}} if name in {"file_read", "artifact_read", "repo_list"} else {}) | ({"limit": {"type": "integer", "minimum": 256, "maximum": 16000}} if name == "file_read" else {}) | ({"relative_path": {"type": "string"}} if name == "repo_search" else {}),
+                ) for key, typ in fields.items()} | _optional_properties(name),
                 "required": list(fields),
                 "additionalProperties": False,
             },
@@ -120,6 +151,11 @@ class ToolDispatcher:
     @property
     def observed_page_count(self) -> int:
         return len({(path, sha256, offset) for path, sha256, offset, _ in self.reads.values()})
+
+    def limit_read_visibility(self, read_id: str, max_chars: int) -> None:
+        """Grant edit authority only for source text actually returned to the model."""
+        path, sha256, offset, text = self.reads[read_id]
+        self.reads[read_id] = (path, sha256, offset, text[:max_chars])
 
     def inspection_snapshot(self, max_chars: int = 9000) -> str:
         """Return bounded observed source for a fresh edit-only model turn."""
@@ -212,6 +248,8 @@ class ToolDispatcher:
                 self.reads[read_id] = (path.relative_to(self.workspace.root).as_posix(), data["sha256"], data["offset"], data["text"])
                 data["read_id"] = read_id
                 data["fully_read"] = self._coverage(self.reads[read_id][0], data["sha256"]) >= len(text)
+            elif name == "file_outline":
+                data = self._file_outline(args["relative_path"], args.get("max_items", 80))
             elif name == "edit_file":
                 if args["read_id"] not in self.reads:
                     raise ValueError("unknown read_id; read the target file first")
@@ -226,6 +264,10 @@ class ToolDispatcher:
             elif name == "write_file":
                 data = self._write_file(args)
             elif name == "patch_apply":
+                if len(args["edits"]) > MAX_PATCH_EDITS:
+                    raise ValueError("patch batch exceeds eight edits")
+                if sum(len(edit["new_text"].encode("utf-8")) for edit in args["edits"]) > MAX_PATCH_REPLACEMENT_BYTES:
+                    raise ValueError("patch replacement batch exceeds size limit")
                 data = self._patch(args["edits"])
             elif name == "command_start":
                 if not self.allow_commands:
@@ -234,13 +276,33 @@ class ToolDispatcher:
                 data = result
             elif name == "diff_inspect":
                 changes = self.workspace.changes()
-                data = {"changed_files": changes.changed_files, "attributable_files": changes.attributable_files, "external_files": changes.external_files, "ambiguous_files": changes.ambiguous_files, "patch": self.workspace.patch_text()[:12000]}
+                patch = self.workspace.patch_text().encode("utf-8")
+                artifact = self.artifacts.put(patch, "ion_patch") if patch else None
+                data = {"changed_files": changes.changed_files, "attributable_files": changes.attributable_files,
+                        "external_files": changes.external_files, "ambiguous_files": changes.ambiguous_files,
+                        "patch_artifact_id": artifact.artifact_id if artifact else None,
+                        "patch_bytes": len(patch), "truncated": bool(patch)}
+            elif name == "diff_summary":
+                data = self._diff_summary(args.get("relative_paths", ()))
             elif name == "artifact_read":
-                data = self._page(self.artifacts.read(args["artifact_id"]).decode("utf-8", "replace"), args.get("offset", 0))
+                raw = self.artifacts.read(args["artifact_id"])
+                decoded = raw.decode("utf-8", "replace")
+                complete = self.artifacts.is_complete(args["artifact_id"])
+                data = {**self._page(decoded, args.get("offset", 0), args.get("limit", 4000)),
+                        "complete": complete, "lossy": not complete or decoded.encode("utf-8") != raw}
+            elif name == "artifact_search":
+                data = self._artifact_search(args["artifact_id"], args["query"],
+                                             args.get("cursor", 0), args.get("max_matches", 20))
             else:
                 data = {"summary": args["summary"]}
-            result = ToolResult(operation_id=call.operation_id, status=OperationStatus.succeeded, summary=name, data=data)
-        except (ValueError, OSError, UnicodeError, KeyError, TypeError, ValidationError) as exc:
+            artifact_id = data.get("patch_artifact_id") or data.get("artifact_id")
+            result = ToolResult(operation_id=call.operation_id, status=OperationStatus.succeeded, summary=name,
+                                data=data, artifact_ids=(artifact_id,) if artifact_id else (),
+                                truncated=bool(data.get("truncated", False)), lossy=bool(data.get("lossy", False)))
+        except ValidationError as exc:
+            location = ".".join(str(part) for part in exc.path) or "arguments"
+            result = self._fail(call, f"invalid {location}: {exc.validator} constraint")
+        except (ValueError, OSError, UnicodeError, KeyError, TypeError) as exc:
             result = self._fail(call, str(exc))
         self.results[result.operation_id] = result
         return result
@@ -251,6 +313,81 @@ class ToolDispatcher:
             raise ValueError("offset exceeds file length")
         end = min(offset + limit, len(text))
         return {"text": text[offset:end], "offset": offset, "next_offset": end if end < len(text) else None, "truncated": end < len(text)}
+
+    def _file_outline(self, relative_path: str, max_items: int) -> dict[str, Any]:
+        if private_path(relative_path):
+            raise ValueError("private file content is unavailable to the model")
+        path = self.workspace.resolve(relative_path)
+        text = path.read_bytes().decode("utf-8")
+        lines = text.splitlines()
+        markers: list[dict[str, Any]] = []
+        for number, line in enumerate(lines, 1):
+            stripped = line.strip()
+            heading = re.match(r"#{1,6}\s+(.{1,80})", stripped)
+            declaration = re.match(r"(?:async\s+)?(class|def)\s+([A-Za-z_][A-Za-z_0-9]{0,79})", stripped)
+            imported = re.match(r"(?:from\s+([A-Za-z_][\w.]*)\s+import|import\s+([A-Za-z_][\w.]*))", stripped)
+            if heading:
+                kind, label = "heading", heading.group(1)
+            elif declaration:
+                kind, label = declaration.group(1), declaration.group(2)
+            elif imported:
+                kind, label = "import", imported.group(1) or imported.group(2)
+            else:
+                continue
+            markers.append({"kind": kind, "label": label[:80], "start_line": number})
+        items = []
+        for index, marker in enumerate(markers[:max_items]):
+            end = markers[index + 1]["start_line"] - 1 if index + 1 < len(markers) else len(lines)
+            items.append({**marker, "end_line": end})
+        return {"path": path.relative_to(self.workspace.root).as_posix(), "line_count": len(lines),
+                "items": items, "truncated": len(markers) > max_items}
+
+    def _artifact_search(self, artifact_id: str, query: str, cursor: int, max_matches: int) -> dict[str, Any]:
+        if not query.strip():
+            raise ValueError("query must contain text")
+        raw = self.artifacts.read(artifact_id)
+        text = raw.decode("utf-8", "replace")
+        complete = self.artifacts.is_complete(artifact_id)
+        if cursor > len(text):
+            raise ValueError("cursor exceeds artifact length")
+        matches = []
+        position = cursor
+        for _ in range(max_matches):
+            found = text.find(query, position)
+            if found < 0:
+                break
+            start = max(0, found - 76)
+            snippet = text[start:min(len(text), start + 160)].replace("\n", " ").replace("\r", " ")
+            matches.append({"offset": found, "snippet": snippet})
+            position = found + len(query)
+        more = text.find(query, position) >= 0
+        return {"matches": matches, "next_cursor": position if more else None,
+                "truncated": more, "complete": complete, "lossy": not complete or text.encode("utf-8") != raw}
+
+    def _diff_summary(self, relative_paths: tuple[str, ...] | list[str]) -> dict[str, Any]:
+        selected = set()
+        for relative in relative_paths:
+            if private_path(relative):
+                raise ValueError("private file content is unavailable to the model")
+            path = self.workspace.resolve(relative, allow_new=True)
+            selected.add(path.relative_to(self.workspace.root).as_posix())
+        changes = self.workspace.changes()
+        current = self.workspace._snapshot()
+        paths = [path for path in changes.changed_files if (not selected or path in selected) and not private_path(path)]
+        files = []
+        for path in paths[:60]:
+            before_size = after_size = None
+            if path in self.workspace.write_contents:
+                before, after = self.workspace.write_contents[path]
+                before_size, after_size = len(before), len(after)
+            elif path in current:
+                after_size = (self.workspace.root / path).stat().st_size
+            files.append({"path": path, "before_hash": self.workspace.baseline.get(path),
+                          "after_hash": current.get(path), "before_bytes": before_size,
+                          "after_bytes": after_size,
+                          "status": ("attributable" if path in changes.attributable_files else
+                                     "ambiguous" if path in changes.ambiguous_files else "external")})
+        return {"files": files, "changed_count": len(paths), "truncated": len(paths) > 60}
 
     def _coverage(self, path: str, sha256: str) -> int:
         end = 0
@@ -312,16 +449,20 @@ class ToolDispatcher:
             raise ValueError("edits must be a nonempty array")
         prepared = []
         seen = set()
+        observed = {(path, sha256) for path, sha256, _, _ in self.reads.values()}
         for edit in edits:
             if set(edit) != {"path", "expected_hash", "old_text", "new_text"}:
                 raise ValueError("invalid patch edit fields")
             relative = edit["path"]
             if private_path(relative):
                 raise ValueError("private file edits are unavailable")
+            path = self.workspace.resolve(relative)
+            relative = path.relative_to(self.workspace.root).as_posix()
             if relative in seen:
                 raise ValueError("duplicate patch path")
             seen.add(relative)
-            path = self.workspace.resolve(relative)
+            if (relative, edit["expected_hash"]) not in observed:
+                raise ValueError("patch requires an observed read of each target hash")
             raw = path.read_bytes()
             if digest(raw) != edit["expected_hash"]:
                 raise ValueError("stale patch input")

@@ -38,6 +38,7 @@ async def test_scripted_coding_loop_changes_file_and_verifies_relevant_check(tmp
     await engine.steer("Do not change the test file")
     result = await engine.run(task)
     assert "Do not change the test file" in provider.requests[0].messages[0]["content"]
+    assert provider.requests[1].max_output_tokens == 4096
     assert (repo / "bug.py").read_text().endswith("return 2\n")
     assert result.outcome.value == "verified"
     assert result.patch_artifact_id
