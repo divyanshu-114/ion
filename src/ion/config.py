@@ -51,7 +51,7 @@ class AppConfig(BaseModel):
     economy: EconomyConfig = Field(default_factory=EconomyConfig)
 
 
-def load_config(path: Path) -> AppConfig:
+def load_config(path: Path, *, use_environment: bool = True) -> AppConfig:
     with path.open("rb") as stream:
         data = tomllib.load(stream)
     config = AppConfig.model_validate(data)
@@ -63,7 +63,63 @@ def load_config(path: Path) -> AppConfig:
         resolve_profile(config, config.evaluation_profile, "evaluation")
     for name in config.profiles:
         resolve_profile(config, name, "product")
-    return config
+    return apply_environment(config) if use_environment else config
+
+
+def evaluation_requested() -> bool:
+    value = os.environ.get("AI_EVALUATION", "").strip().lower()
+    if value not in {"", "0", "1", "false", "true"}:
+        raise ValueError("AI_EVALUATION must be 1/true or 0/false")
+    return value in {"1", "true"}
+
+
+def apply_environment(config: AppConfig, *, force_evaluation: bool = False) -> AppConfig:
+    """Snapshot explicit routing settings once, before starting a session.
+
+    Never infer a host from a secret or probe multiple providers with a key.
+    The generated profile deliberately uses only the universal credential.
+    """
+    provider = os.environ.get("AI_PROVIDER", "").strip().lower()
+    endpoint = os.environ.get("AI_BASE_URL", "").strip()
+    model = os.environ.get("AI_MODEL", "").strip()
+    requested = force_evaluation or evaluation_requested()
+    evaluation = requested or bool(config.evaluation_profile)
+    if not (provider or endpoint or model or requested):
+        return config
+
+    presets = {
+        "deepseek": ("https://api.deepseek.com", "deepseek-flash"),
+        "qwen": ("https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-plus"),
+        "groq": ("https://api.groq.com/openai/v1", ""),
+        "openrouter": ("https://openrouter.ai/api/v1", ""),
+        "openai": ("https://api.openai.com/v1", ""),
+    }
+    if provider or endpoint:
+        if provider and provider not in presets and not (endpoint and model):
+            raise ValueError("Unknown AI_PROVIDER requires AI_BASE_URL and AI_MODEL")
+        default_endpoint, default_model = presets.get(provider, ("", ""))
+        endpoint = endpoint or default_endpoint
+        model = model or default_model
+        if not model:
+            raise ValueError("AI_MODEL is required for this provider or custom endpoint")
+        raw = dict(provider=provider or "openai-compatible", endpoint=endpoint,
+                   model_id=model, context_window=8192, max_output_tokens=4096)
+    else:
+        name = config.evaluation_profile or config.default_profile
+        raw = resolve_profile(config, name, "product").model_dump()
+        if model:
+            raw["model_id"] = model
+    raw.update(api_key_env="AI_API_KEY", locked=evaluation)
+    name = "environment"
+    while name in config.profiles:
+        name = "_" + name
+    result = config.model_copy(update={
+        "profiles": {**config.profiles, name: raw},
+        "default_profile": name,
+        "evaluation_profile": name if evaluation else None,
+    })
+    resolve_profile(result, name, "evaluation" if evaluation else "product")
+    return result
 
 
 def resolve_profile(config: AppConfig, name: str, mode: Literal["product", "evaluation"]) -> ModelProfile:

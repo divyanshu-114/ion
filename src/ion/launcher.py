@@ -6,7 +6,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from ion.config import load_config
+from ion.config import apply_environment, evaluation_requested, load_config
 from ion.tui.app import IonApp
 
 
@@ -23,8 +23,12 @@ def main() -> int:
         return 2
     workspace_root = Path.cwd().resolve(strict=True)
     config_path = Path(os.environ.get("ION_CONFIG", Path(__file__).resolve().parents[2] / "ion.toml"))
-    config = load_config(config_path)
-    load_local_env(config_path, evaluation=bool(config.evaluation_profile))
+    config = load_config(config_path, use_environment=False)
+    # The official launch contract supplies only AI_API_KEY. Capture its
+    # presence before dotenv loading so local credentials cannot affect it.
+    supplied_key = bool(os.environ.get("AI_API_KEY", "").strip())
+    load_local_env(config_path, evaluation=supplied_key or bool(config.evaluation_profile) or evaluation_requested())
+    config = apply_environment(config, force_evaluation=supplied_key)
     IonApp(config=config, workspace_root=workspace_root).run()
     return 0
 

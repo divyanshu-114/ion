@@ -4,9 +4,35 @@ from pathlib import Path
 import httpx
 import pytest
 
-from ion.config import load_config, resolve_profile
+from ion.config import load_config, resolve_credential, resolve_profile
 from ion.contracts import ModelRequest
 from ion.providers.openai_compatible import OpenAICompatibleProvider
+
+
+@pytest.mark.parametrize("provider,endpoint", [
+    ("deepseek", "https://api.deepseek.com"),
+    ("qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+    ("custom", "https://judge.example/v1"),
+])
+async def test_universal_key_reaches_only_selected_endpoint(monkeypatch, provider, endpoint):
+    monkeypatch.setenv("AI_PROVIDER", provider)
+    monkeypatch.setenv("AI_BASE_URL", endpoint)
+    monkeypatch.setenv("AI_MODEL", "judge-model")
+    monkeypatch.setenv("AI_API_KEY", "judge-key")
+    monkeypatch.setenv("AI_EVALUATION", "1")
+    config = load_config(Path(__file__).resolve().parents[1] / "ion.toml")
+    profile = resolve_profile(config, config.evaluation_profile, "evaluation")
+    credential, _ = resolve_credential(profile, "evaluation")
+
+    def handle(request):
+        assert str(request.url) == endpoint + "/chat/completions"
+        assert request.headers["Authorization"] == "Bearer judge-key"
+        assert json.loads(request.content)["model"] == "judge-model"
+        return httpx.Response(200, json={"choices": [{"message": {"content": "Ready"}}]})
+
+    request = ModelRequest(messages=({"role": "user", "content": "Hello"},), max_output_tokens=100, profile_digest="fixture")
+    events = [event async for event in OpenAICompatibleProvider(profile, credential, httpx.MockTransport(handle)).generate(request)]
+    assert events[-1].kind == "completed"
 
 
 @pytest.mark.asyncio
