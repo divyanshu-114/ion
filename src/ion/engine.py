@@ -13,12 +13,16 @@ from ion.contracts import BudgetReport, EngineEvent, ModelEvent, ModelRequest, O
 from ion.diagnostics import DiagnosticLogger
 from ion.gateway import ModelGateway, profile_digest
 from ion.instructions import InstructionResolver
+from ion.intent import task_intent
 from ion.protocols import FinishAction, ToolAction, parse_action
 from ion.tools.bundles import select_tool_bundle
 from ion.tools.registry import ToolDispatcher, tool_schemas
 from ion.verification import CompletionGate, observe_command
 from ion.working_memory import LoopGuard, WorkingMemory
 from ion.memory.retrieval import MemoryRetriever
+
+
+READ_ONLY_TOOLS = ('repo_list', 'repo_search', 'file_outline', 'file_read', 'diff_summary', 'diff_inspect', 'artifact_search', 'artifact_read', 'finish_request')
 
 
 class Engine:
@@ -40,6 +44,19 @@ class Engine:
     def _diagnose(self, event: str, **fields) -> None:
         if self.diagnostics:
             self.diagnostics.emit(event, **fields)
+
+    @staticmethod
+    def _answer_text(content: str) -> str:
+        """Some native-tool models wrap their final prose in a JSON envelope."""
+        try:
+            value = json.loads(content)
+        except ValueError:
+            return content.strip()
+        if isinstance(value, dict) and set(value) <= {'content', 'answer', 'summary'}:
+            for name in ('content', 'answer', 'summary'):
+                if isinstance(value.get(name), str) and value[name].strip():
+                    return value[name].strip()
+        return content.strip()
 
     @staticmethod
     def _tool_response(result, economy: bool = False, max_chars: int = 4000) -> str:
@@ -92,7 +109,8 @@ class Engine:
 
     async def run(self, task: TaskSpec) -> TaskResult:
         economy = task.mode == "product" and self.config.economy.enabled
-        edit_intent = bool(re.search(r"\b(?:add|change|create|edit|fix|implement|make|remove|rename|replace|rewrite|update)\w*\b", task.text, re.IGNORECASE))
+        intent = task_intent(task.text)
+        edit_intent = intent == 'edit'
         create_intent = bool(re.search(r"\b(?:add|create|generate|write)\b", task.text, re.IGNORECASE))
         if economy:
             self.budget = BudgetLedger(max_requests=self.config.economy.max_requests,
@@ -128,7 +146,7 @@ class Engine:
         progress_hint = ""
         repair_attempts = 0
         edit_phase_started = False
-        expanded_output = bool(economy and re.search(r"\b(?:rewrite|replace|regenerate)\b", task.text, re.IGNORECASE))
+        expanded_output = bool(economy and edit_intent and re.search(r"\b(?:rewrite|replace|regenerate)\b", task.text, re.IGNORECASE))
         truncation_retries = 0
         forced_write = False
         edit_complete = False
@@ -148,6 +166,7 @@ class Engine:
         policy = BudgetPolicy(verification_tokens=self.config.economy.verification_reserve_tokens,
                               finalization_tokens=self.config.economy.finalization_reserve_tokens,
                               preferred_output_tokens=preferred_tiers)
+        directed_tools_supported = True
         await self._emit(Phase.intake, "Task accepted")
         try:
             if economy:
@@ -184,7 +203,7 @@ class Engine:
                             if visible.get("next_offset") is not None:
                                 progress_hint += f" Read the unseen text with file_read next_offset={visible['next_offset']}."
                             else:
-                                progress_hint += " Use this source for the edit."
+                                progress_hint += " Use this evidence for the user's request."
                             forced_write = expanded_output and visible["fully_read"]
                             if forced_write:
                                 progress_hint += " Rewrite this complete file now with write_file; preserve documented facts and return complete content."
@@ -197,6 +216,13 @@ class Engine:
                     additions = self.pending_steering[:]
                     self.pending_steering.clear()
                     self.applied_steering.extend(additions)
+                    # A later instruction can change a question into an edit
+                    # request, or explicitly ask us to stop editing.
+                    for addition in additions:
+                        updated = task_intent(addition)
+                        if updated != 'task':
+                            intent = updated
+                            edit_intent = intent == 'edit'
                     history.append({"role": "user", "content": "User steering: " + "\n".join(additions)})
                 phase = Phase.inspect if not self.dispatcher.reads else Phase.act
                 if edit_complete and self.dispatcher.allow_commands:
@@ -225,6 +251,8 @@ class Engine:
                     names += ("write_file",)
                 if phase == Phase.act and workspace.writes and self.dispatcher.allow_commands:
                     names += ("command_start",)
+                if intent == 'answer':
+                    names = tuple(name for name in names if name in READ_ONLY_TOOLS)
                 schemas = tool_schemas(names)
                 offered_names = [item["function"]["name"] for item in schemas]
                 pointers = memory.render(economy=economy)
@@ -296,7 +324,10 @@ class Engine:
                     await self._emit(Phase.act, f"Context trimmed: {reported_dropped_turns} older tool turns omitted")
                 self.dispatcher.scope_write_reads(packet.messages)
                 forced_write = forced_write and bool(self.dispatcher.visible_write_reads)
-                request = ModelRequest(messages=packet.messages, tools=schemas if profile.tool_protocol == "native" else (), max_output_tokens=packet.max_output_tokens, profile_digest=profile_digest(profile), tool_choice="write_file" if forced_write and profile.tool_protocol == "native" else None)
+                directed_tool = 'write_file' if forced_write else 'edit_file' if economy and edit_intent and action_reminders and self.dispatcher.reads and not workspace.writes else None
+                if not directed_tools_supported or directed_tool not in offered_names:
+                    directed_tool = None
+                request = ModelRequest(messages=packet.messages, tools=schemas if profile.tool_protocol == "native" else (), max_output_tokens=packet.max_output_tokens, profile_digest=profile_digest(profile), tool_choice=directed_tool if profile.tool_protocol == "native" else None)
                 request_reserve = packet.estimated_input_tokens + packet.max_output_tokens
                 remaining_after = None if snapshot.remaining_tokens is None else snapshot.remaining_tokens - request_reserve
                 await self._emit(phase, f"Request {self.budget.used}/{self.budget.max_requests} · ~{packet.estimated_input_tokens} input · {packet.max_output_tokens} cap · {request_reserve} reserved · {snapshot.settled_tokens} settled · {remaining_after} remaining · {plan.protected_tokens} protected")
@@ -338,8 +369,9 @@ class Engine:
                                finish_reason=finish_reason,
                                accounted_tokens=self.budget.tokens_used)
                 if error:
-                    if forced_write and error == "provider rejected request (400)" and repair_attempts < 1:
+                    if request.tool_choice and error == "provider rejected request (400)" and repair_attempts < 1:
                         forced_write = False
+                        directed_tools_supported = False
                         repair_attempts += 1
                         await self._emit(phase, "Provider rejected directed tool selection; retrying with automatic selection")
                         continue
@@ -447,8 +479,8 @@ class Engine:
                         if call.tool == "file_read":
                             detail = f" · {call.arguments.get('relative_path', '')} · offset {call.arguments.get('offset', 0)}"
                         await self._emit(phase, f"{call.tool} requested{detail}")
-                        if call.tool not in names:
-                            unavailable_error = "Use the offered tools; this command is outside the current execution policy."
+                        if call.tool not in offered_names:
+                            unavailable_error = "This is a read-only question. Inspect the relevant files and answer without making changes or running commands." if intent == 'answer' else "Use the offered tools; this command is outside the current execution policy."
                             result = ToolResult(operation_id=call.operation_id, status=OperationStatus.failed,
                                                 summary="tool unavailable", error=unavailable_error)
                             self._diagnose("tool.result", tool=call.tool, status=result.status.value,
@@ -483,8 +515,17 @@ class Engine:
                                     history.append({"role": "user", "content": response})
                                 await self._emit(Phase.act, "Asked model to inspect the repository before finishing")
                                 continue
-                            summary = str(call.arguments.get("summary", content))
-                            if economy and edit_intent and not workspace.writes:
+                            summary = self._answer_text(str(call.arguments.get("summary", content)))
+                            if edit_intent and not workspace.writes and action_reminders < 2:
+                                action_reminders += 1
+                                response = json.dumps({"error": "The user requested an actual change. Apply a useful edit using the observed files; suggestions alone do not complete this task. If an edit is impossible, explain the concrete blocker."})
+                                if profile.tool_protocol == 'native':
+                                    history.append({'role': 'tool', 'tool_call_id': event.call_id, 'content': response})
+                                else:
+                                    history.append({'role': 'user', 'content': response})
+                                await self._emit(Phase.plan, 'No changes yet; asking the model to apply the requested edit')
+                                continue
+                            if edit_intent and not workspace.writes:
                                 summary = "No edits were applied. " + summary
                                 outcome = Outcome.blocked
                                 error_category = "no_edit_applied"
@@ -633,6 +674,9 @@ class Engine:
                             continue
                         break
                 else:
+                    if intent == 'answer' and inspected and content.strip() and not self.pending_steering:
+                        summary = self._answer_text(content)
+                        break
                     if action_reminders < 2:
                         action_reminders += 1
                         history.append({"role": "assistant", "content": content or "(empty response)"})
