@@ -294,6 +294,8 @@ class Engine:
                 if packet.dropped_turns > reported_dropped_turns:
                     reported_dropped_turns = packet.dropped_turns
                     await self._emit(Phase.act, f"Context trimmed: {reported_dropped_turns} older tool turns omitted")
+                self.dispatcher.scope_write_reads(packet.messages)
+                forced_write = forced_write and bool(self.dispatcher.visible_write_reads)
                 request = ModelRequest(messages=packet.messages, tools=schemas if profile.tool_protocol == "native" else (), max_output_tokens=packet.max_output_tokens, profile_digest=profile_digest(profile), tool_choice="write_file" if forced_write and profile.tool_protocol == "native" else None)
                 request_reserve = packet.estimated_input_tokens + packet.max_output_tokens
                 remaining_after = None if snapshot.remaining_tokens is None else snapshot.remaining_tokens - request_reserve

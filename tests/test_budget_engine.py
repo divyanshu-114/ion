@@ -336,6 +336,52 @@ async def test_clipped_read_cannot_authorize_whole_file_rewrite(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_context_omitted_read_cannot_authorize_whole_file_rewrite(tmp_path):
+    provider = ScriptedProvider([
+        [ModelEvent(kind="tool_call", tool="file_read", arguments={"relative_path": "first.txt", "limit": 12000}, call_id="first"), ModelEvent(kind="completed")],
+        [ModelEvent(kind="tool_call", tool="file_read", arguments={"relative_path": "second.txt"}, call_id="second"), ModelEvent(kind="completed")],
+        [ModelEvent(kind="tool_call", tool="write_file", arguments={
+            "plan": "Replace the earlier file", "relative_path": "first.txt", "read_id": "r1",
+            "content": "replacement", "done": True,
+        }, call_id="stale-write"), ModelEvent(kind="completed")],
+        [ModelEvent(kind="tool_call", tool="finish_request", arguments={"summary": "Could not rewrite"}, call_id="finish"), ModelEvent(kind="completed")],
+    ])
+    engine, repo = _engine(tmp_path, provider, input_budget=4650,
+                           files={"first.txt": "A" * 9000, "second.txt": "second-file evidence"},
+                           economy_fields={"max_tool_preview_chars": 9000})
+    result = await engine.run(TaskSpec(text="Change repository notes", repo_path=str(repo),
+                                       profile_name=engine.config.default_profile))
+
+    assert len(provider.requests) >= 3, result
+    assert not any(message.get("tool_call_id") == "first" for message in provider.requests[2].messages)
+    assert "second-file evidence" in json.dumps(provider.requests[2].messages)
+    assert (repo / "first.txt").read_text() == "A" * 9000
+    assert any(item.error and "existing file requires read_id" in item.error
+               for item in engine.dispatcher.results.values())
+    assert not result.changed_files
+
+
+@pytest.mark.asyncio
+async def test_engine_rewrite_accepts_all_visible_file_pages(tmp_path):
+    provider = ScriptedProvider([
+        [ModelEvent(kind="tool_call", tool="file_read", arguments={"relative_path": "long.txt", "limit": 4000}, call_id="first-page"), ModelEvent(kind="completed")],
+        [ModelEvent(kind="tool_call", tool="file_read", arguments={"relative_path": "long.txt", "offset": 4000, "limit": 4000}, call_id="second-page"), ModelEvent(kind="completed")],
+        [ModelEvent(kind="tool_call", tool="write_file", arguments={
+            "plan": "Rewrite both observed pages", "relative_path": "long.txt", "read_id": "r1",
+            "content": "replacement", "done": True,
+        }, call_id="write"), ModelEvent(kind="completed")],
+    ])
+    engine, repo = _engine(tmp_path, provider, files={"long.txt": "A" * 4000 + "B" * 2000})
+    result = await engine.run(TaskSpec(text="Rewrite the repository note", repo_path=str(repo),
+                                       profile_name=engine.config.default_profile))
+
+    assert len(provider.requests) == 3, result
+    assert {message.get("tool_call_id") for message in provider.requests[2].messages} >= {"first-page", "second-page"}
+    assert (repo / "long.txt").read_text() == "replacement"
+    assert result.changed_files == ("long.txt",)
+
+
+@pytest.mark.asyncio
 async def test_finalization_uses_reserved_fifth_request_after_four_reads(tmp_path):
     provider = ScriptedProvider([
         [ModelEvent(kind="tool_call", tool="file_read", arguments={"relative_path": f"f{i}.txt"}, call_id=f"r{i}"), ModelEvent(kind="completed")]

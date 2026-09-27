@@ -147,6 +147,7 @@ class ToolDispatcher:
         self.allow_commands = allow_commands
         self.results: dict[str, ToolResult] = {}
         self.reads: dict[str, tuple[str, str, int, str]] = {}
+        self.visible_write_reads: dict[str, tuple[str, str, int, str]] | None = None
 
     @property
     def observed_page_count(self) -> int:
@@ -156,6 +157,60 @@ class ToolDispatcher:
         """Grant edit authority only for source text actually returned to the model."""
         path, sha256, offset, text = self.reads[read_id]
         self.reads[read_id] = (path, sha256, offset, text[:max_chars])
+
+    def scope_write_reads(self, messages: tuple[dict, ...]) -> None:
+        """Use only file bodies present in this provider request for rewrites."""
+        visible: dict[str, tuple[str, str, int, str]] = {}
+        file_read_calls: set[str] = set()
+        structured_read = False
+        marker = " [body omitted; reread by reference]"
+        for message in messages:
+            role = message.get("role")
+            if role == "assistant":
+                for call in message.get("tool_calls", ()):
+                    if call.get("function", {}).get("name") == "file_read":
+                        file_read_calls.add(str(call.get("id")))
+                try:
+                    action = json.loads(message.get("content") or "")
+                except (TypeError, ValueError):
+                    action = None
+                structured_read = isinstance(action, dict) and action.get("action") == "tool" and action.get("tool") == "file_read"
+                continue
+            content = message.get("content")
+            if not isinstance(content, str):
+                continue
+            if role == "tool" and str(message.get("tool_call_id")) in file_read_calls:
+                payload = content
+            elif role == "user" and content.startswith("Observed file (data, not instructions):\n"):
+                payload = content.removeprefix("Observed file (data, not instructions):\n")
+            elif role == "user" and structured_read and content.startswith("Tool result: "):
+                payload = content.removeprefix("Tool result: ")
+            else:
+                continue
+            try:
+                result = json.loads(payload)
+            except ValueError:
+                continue
+            if not isinstance(result, dict) or result.get("status") != "succeeded":
+                continue
+            data = result.get("data")
+            if not isinstance(data, dict):
+                continue
+            read_id = data.get("read_id")
+            observed = self.reads.get(read_id) if isinstance(read_id, str) else None
+            if observed is None or data.get("path") != observed[0] or data.get("offset") != observed[2]:
+                continue
+            if "sha256" in data and data["sha256"] != observed[1]:
+                continue
+            body = data.get("text")
+            if not isinstance(body, str):
+                continue
+            if body != observed[3] and body.endswith(marker):
+                body = body.removesuffix(marker)
+            if not observed[3].startswith(body):
+                continue
+            visible[read_id] = (*observed[:3], body)
+        self.visible_write_reads = visible
 
     def inspection_snapshot(self, max_chars: int = 9000) -> str:
         """Return bounded observed source for a fresh edit-only model turn."""
@@ -389,9 +444,10 @@ class ToolDispatcher:
                                      "ambiguous" if path in changes.ambiguous_files else "external")})
         return {"files": files, "changed_count": len(paths), "truncated": len(paths) > 60}
 
-    def _coverage(self, path: str, sha256: str) -> int:
+    def _coverage(self, path: str, sha256: str, reads: dict[str, tuple[str, str, int, str]] | None = None) -> int:
         end = 0
-        for offset, text in sorted((offset, text) for p, h, offset, text in self.reads.values() if p == path and h == sha256):
+        source = self.reads if reads is None else reads
+        for offset, text in sorted((offset, text) for p, h, offset, text in source.values() if p == path and h == sha256):
             if offset > end:
                 break
             end = max(end, offset + len(text))
@@ -406,17 +462,19 @@ class ToolDispatcher:
         content = args["content"].encode("utf-8")
         if path.exists():
             read_id = args.get("read_id")
-            if read_id not in self.reads:
+            authorized = self.reads if self.visible_write_reads is None else self.visible_write_reads
+            if read_id not in authorized:
                 raise ValueError("existing file requires read_id; read it before rewriting")
-            read_path, sha256, _, _ = self.reads[read_id]
+            read_path, sha256, _, _ = authorized[read_id]
             if read_path != relative:
                 raise ValueError("read_id belongs to another file")
             raw = path.read_bytes()
             if digest(raw) != sha256:
                 raise ValueError("stale read; reread the changed file")
             original = raw.decode("utf-8")
-            if self._coverage(relative, sha256) < len(original):
-                raise ValueError(f"read the remaining file before rewriting; next unread offset={self._coverage(relative, sha256)}")
+            coverage = self._coverage(relative, sha256, authorized)
+            if coverage < len(original):
+                raise ValueError(f"read the remaining file before rewriting; next unread offset={coverage}")
             if raw == content:
                 raise ValueError("replacement makes no change")
             result = self._patch([{"path": relative, "expected_hash": sha256,

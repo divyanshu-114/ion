@@ -64,5 +64,5 @@ class ArtifactStore:
         return state == b"1"
 
     def has_artifacts(self) -> bool:
-        return any(path.is_file() and (self._metadata_root / path.name).is_file()
+        return any(path.is_file() and path.name not in {"MEMORY.md", ".metadata"}
                    for path in self.root.iterdir())

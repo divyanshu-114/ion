@@ -96,6 +96,27 @@ async def test_incomplete_artifact_stays_lossy_after_store_reopens(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_legacy_artifact_is_discoverable_and_readable_without_metadata(tmp_path):
+    from ion.tools.bundles import select_tool_bundle
+
+    _, artifacts, dispatcher = dispatcher_for(tmp_path)
+    (artifacts.root / "MEMORY.md").write_text("task pointers")
+    assert artifacts.has_artifacts() is False
+    (artifacts.root / "legacy-output").write_bytes(b"before needle after")
+
+    assert artifacts.has_artifacts() is True
+    offered = select_tool_bundle(Phase.act, has_artifacts=artifacts.has_artifacts())
+    assert {"artifact_read", "artifact_search"} <= set(offered)
+    page = await call(dispatcher, "artifact_read", artifact_id="legacy-output")
+    search = await call(dispatcher, "artifact_search", artifact_id="legacy-output", query="needle")
+    assert page.status == "succeeded"
+    assert page.data["text"] == "before needle after"
+    assert page.data["complete"] is False
+    assert search.status == "succeeded"
+    assert search.data["matches"][0]["offset"] == 7
+
+
+@pytest.mark.asyncio
 async def test_diff_summary_shows_hashes_and_sizes_without_patch(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
