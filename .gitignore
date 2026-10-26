@@ -1,0 +1,24 @@
+# Python runtime and caches
+__pycache__/
+*.py[cod]
+.venv/
+.uv-cache/
+.uv-tools/
+.superpowers/
+.worktrees/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local credentials and configuration
+.env
+.env.*
+
+# Build and editor artifacts
+build/
+dist/
+*.egg-info/
+.DS_Store
+.idea/
+.vscode/

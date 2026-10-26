@@ -1,0 +1,26 @@
+"""Command labels shared by the help picker and inline suggestions."""
+
+COMMANDS = (
+    ('/models', 'Choose a model'),
+    ('/providers', 'View providers and masked keys'),
+    ('/connect', 'Connect a provider for this session'),
+    ('/github URL', 'Fix a public GitHub issue'),
+    ('/sessions', 'Browse saved tasks'),
+    ('/history', 'Browse saved tasks'),
+    ('/inspect TASK_ID', 'View a saved result'),
+    ('/resume TASK_ID', 'Prepare a saved task to resume'),
+    ('/steer TEXT', 'Guide the running task'),
+    ('/logs', 'Read recent activity and errors'),
+    ('/new', 'Start a new task'),
+    ('/stop', 'Stop the running task'),
+    ('/sidebar', 'Show or hide task details'),
+    ('/repo', 'Show the current workspace'),
+    ('/doctor', 'Check the provider connection'),
+    ('/help', 'Browse all commands'),
+    ('/quit', 'Exit Ion (Ctrl+C)'),
+    ('/model', 'Choose a model (alias)'),
+    ('/clear', 'Start a new task (alias)'),
+    ('/cancel', 'Stop the running task (alias)'),
+    ('/exit', 'Exit Ion (alias)'),
+    ('/debug', 'Read recent activity and errors (alias)'),
+)

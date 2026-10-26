@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "prediction_format": ["instance_id", "model_name_or_path", "model_patch"],
+  "cases": [
+    {
+      "id": "offline-readme-edit",
+      "instance_id": "ion__offline-readme-edit",
+      "benchmark": "swebench-compatible",
+      "task": "Update a README description while preserving existing facts",
+      "expected_files": ["README.md"],
+      "required_check": false
+    },
+    {
+      "id": "offline-bug-fix",
+      "instance_id": "ion__offline-bug-fix",
+      "benchmark": "swebench-compatible",
+      "task": "Find all bugs and solve it with a regression test",
+      "expected_files": ["bug.py"],
+      "test_command": ["python", "-m", "pytest", "tests/test_bug.py", "-q"],
+      "required_check": true
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ion-harness"
+version = "0.1.0"
+description = "A local coding-agent harness"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "PyYAML>=6.0.2,<7",
+  "textual>=5,<8",
+  "httpx>=0.28,<1",
+  "pydantic>=2.11,<3",
+  "jsonschema>=4.24,<5",
+  "pillow>=11,<13",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.4,<10", "pytest-asyncio>=1.1,<2"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[project.scripts]
+ion = "ion.launcher:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ion"]
