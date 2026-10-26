@@ -10,15 +10,22 @@ venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
 
 # Local credentials and configuration
 .env
 .env.*
+*.local
 
 # Build and editor artifacts
 build/
 dist/
 *.egg-info/
 .DS_Store
+Thumbs.db
 .idea/
 .vscode/
+*.swp
+*.swo
+*~
