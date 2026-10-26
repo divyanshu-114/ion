@@ -26,8 +26,8 @@ Use an interactive terminal on macOS or Linux, with Git, `make`, and `python3` a
 Clone the repository, then install and launch:
 
 ```sh
-git clone https://github.com/divyanshu-114/ion-main.git
-cd ion-main
+git clone https://github.com/divyanshu-114/ion.git
+cd ion
 export AI_API_KEY="<PROVIDED_API_KEY>"
 make setup
 make run
@@ -136,7 +136,7 @@ Source code lives in [src/ion](src/ion); [architecture.md](architecture.md) maps
 
 Use `/help` for commands, `/doctor` for connection diagnostics, and `/logs` for recent failures. Consult [architecture.md](architecture.md) for execution and recovery behavior and [ion.toml](ion.toml) for configuration examples.
 
-Report bugs and propose improvements through [GitHub issues](https://github.com/divyanshu-114/ion-main/issues). Include the task, expected and actual behavior, Python version, provider/model, and relevant redacted diagnostics. Remove credentials and private repository content before sharing logs or artifacts.
+Report bugs and propose improvements through [GitHub issues](https://github.com/divyanshu-114/ion/issues). Include the task, expected and actual behavior, Python version, provider/model, and relevant redacted diagnostics. Remove credentials and private repository content before sharing logs or artifacts.
 
 ## Maintainers and contributions
 
